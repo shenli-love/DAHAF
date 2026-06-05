@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="PublishConfigData" autoUpload="Always" serverName="root@vgkdw5e6k0c4p2etsnow.deepln.com:52817 password" remoteFilesAllowedToDisappearOnAutoupload="false">
+    <serverData>
+      <paths name="root@connect.bjb1.seetacloud.com:37003 password">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="root@connect.bjb1.seetacloud.com:38305 password">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="root@connect.bjb1.seetacloud.com:38305 password (2)">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="root@fhn64t7b4wl3phztalk4090.funhpc.com:30889 password">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/data/coding" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="root@sljcl80swfyrxxczsnow.deepln.com:54107 password">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/data/coding" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="root@v3nyakmdbpr6kweesnow.deepln.com:42651 password">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/data/coding" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="root@vgkdw5e6k0c4p2etsnow.deepln.com:52817 password">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/data/coding" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+    </serverData>
+    <option name="myAutoUpload" value="ALWAYS" />
+  </component>
+</project>

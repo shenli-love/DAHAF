@@ -1,0 +1,22 @@
+# DAHAF-Net 依赖项
+
+# 核心框架
+torch>=1.10.0
+torchvision>=0.11.0
+
+# 数据处理
+opencv-python>=4.5.0
+numpy>=1.21.0
+Pillow>=9.0.0
+
+# 配置和日志
+PyYAML>=6.0
+tensorboard>=2.8.0
+
+# 工具
+tqdm>=4.62.0
+matplotlib>=3.5.0
+
+# 可选：目标检测
+# ultralytics>=8.0.0  # YOLOv8
+ultralytics>=8.4.46

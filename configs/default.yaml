@@ -1,0 +1,44 @@
+MODEL:
+  in_channels: 1
+  dims: [32, 64, 128]
+
+TRAIN:
+  batch_size: 2
+  epochs: 100
+  learning_rate: 0.0001
+  min_lr: 0.000001
+  weight_decay: 0.0001
+  grad_clip: 5.0
+  gradient_weight: 6.0
+  edge_weight: 3.0
+  ssim_weight: 0.5
+  objectness_weight: 0.05
+  lambda_fusion: 1.0
+  lambda_det: 0.05
+  warmup_epochs: 10
+  det_start_epoch: 40
+  det_full_epoch: 60
+
+DATA:
+  root: ./datasets/M3FD_Detection
+  image_size: [192, 192]
+  num_workers: 0
+  pin_memory: true
+
+DETECTION:
+  num_classes: 6
+  detector_cfg: yolo11n.yaml
+  detector_pretrained: yolo11n.pt
+  detector_input_size: 192
+  loss_box: 7.5
+  loss_cls: 0.5
+  loss_dfl: 1.5
+  freeze: true
+  initial_no_grad: true
+  task_dim: 64
+  bridge_channels: 128
+  objectness_guidance_alpha: 0.02
+
+LOG:
+  print_interval: 20
+  save_interval: 2
