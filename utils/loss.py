@@ -42,7 +42,9 @@ class FusionLoss(nn.Module):
         gradient_weight=5.0,
         edge_weight=2.0,
         ssim_weight=1.0,
-        objectness_weight=0.2,
+        objectness_weight=0.4,
+        detail_weight=1.0,
+        semantic_weight=0.2,
     ):
         super().__init__()
         self.sobel = SobelXY()
@@ -51,8 +53,61 @@ class FusionLoss(nn.Module):
         self.edge_weight = edge_weight
         self.ssim_weight = ssim_weight
         self.objectness_weight = objectness_weight
+        self.detail_weight = detail_weight
+        self.semantic_weight = semantic_weight
 
-    def forward(self, img_fused, img_ir, img_vis, objectness_map=None):
+    @staticmethod
+    def _set_requires_grad(module, requires_grad):
+        states = []
+        for param in module.parameters():
+            states.append((param, param.requires_grad))
+            param.requires_grad_(requires_grad)
+        return states
+
+    @staticmethod
+    def _restore_requires_grad(states):
+        for param, requires_grad in states:
+            param.requires_grad_(requires_grad)
+
+    @staticmethod
+    def _normalized_feature_mse(feat, target):
+        feat = F.normalize(feat, dim=1, eps=1e-6)
+        target = F.normalize(target.detach(), dim=1, eps=1e-6)
+        return F.mse_loss(feat, target)
+
+    def _semantic_consistency_loss(self, img_fused, img_ir, img_vis, semantic_detector):
+        if semantic_detector is None:
+            return img_fused.new_zeros(())
+
+        was_training = semantic_detector.training
+        grad_states = self._set_requires_grad(semantic_detector, False)
+        semantic_detector.eval()
+        try:
+            fused_feats = semantic_detector(img_fused)["feats"]
+            with torch.no_grad():
+                ir_feats = semantic_detector(img_ir)["feats"]
+                vis_feats = semantic_detector(img_vis)["feats"]
+        finally:
+            self._restore_requires_grad(grad_states)
+            semantic_detector.train(was_training)
+
+        loss = img_fused.new_zeros(())
+        for fused_feat, ir_feat, vis_feat in zip(fused_feats, ir_feats, vis_feats):
+            loss = loss + 0.5 * (
+                self._normalized_feature_mse(fused_feat, ir_feat)
+                + self._normalized_feature_mse(fused_feat, vis_feat)
+            )
+        return loss / max(len(fused_feats), 1)
+
+    def forward(
+        self,
+        img_fused,
+        img_ir,
+        img_vis,
+        objectness_map=None,
+        detail_map=None,
+        semantic_detector=None,
+    ):
         target_intensity = torch.maximum(img_ir, img_vis)
         loss_intensity = F.l1_loss(img_fused, target_intensity)
 
@@ -60,7 +115,10 @@ class FusionLoss(nn.Module):
         grad_ir = self.sobel(img_ir)
         grad_vis = self.sobel(img_vis)
         target_grad = torch.maximum(grad_ir, grad_vis)
-        loss_gradient = F.l1_loss(grad_fused, target_grad)
+        source_grad = target_grad.detach()
+        source_grad = source_grad / (source_grad.amax(dim=(-2, -1), keepdim=True) + 1e-6)
+        gradient_weight_map = 1.0 + 2.0 * source_grad
+        loss_gradient = (gradient_weight_map * (grad_fused - target_grad).abs()).mean()
 
         edge_weight_map = torch.ones_like(target_grad)
         if objectness_map is not None:
@@ -76,12 +134,26 @@ class FusionLoss(nn.Module):
             target_obj = target_obj / (target_obj.amax(dim=(-2, -1), keepdim=True) + 1e-6)
             loss_objectness = F.l1_loss(objectness_map, target_obj.detach())
 
+        loss_detail = img_fused.new_zeros(())
+        if detail_map is not None:
+            detail_map = F.interpolate(detail_map, size=img_fused.shape[-2:], mode="bilinear", align_corners=False)
+            detail_map = detail_map.clamp(0.0, 1.0)
+            if objectness_map is None:
+                detail_weight_map = torch.ones_like(img_fused)
+            else:
+                detail_weight_map = objectness_map.detach().clamp(0.0, 1.0)
+            loss_detail = (detail_weight_map * (img_fused - detail_map).abs()).mean()
+
+        loss_semantic = self._semantic_consistency_loss(img_fused, img_ir, img_vis, semantic_detector)
+
         total = (
             loss_intensity
             + self.gradient_weight * loss_gradient
             + self.edge_weight * loss_edge
             + self.ssim_weight * loss_ssim
             + self.objectness_weight * loss_objectness
+            + self.detail_weight * loss_detail
+            + self.semantic_weight * loss_semantic
         )
         components = {
             "intensity": loss_intensity,
@@ -89,5 +161,7 @@ class FusionLoss(nn.Module):
             "edge": loss_edge,
             "ssim": loss_ssim,
             "objectness": loss_objectness,
+            "detail": loss_detail,
+            "semantic": loss_semantic,
         }
         return total, components

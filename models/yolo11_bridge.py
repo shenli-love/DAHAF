@@ -54,6 +54,13 @@ class YOLO11Detector(nn.Module):
         for param in self.model.parameters():
             param.requires_grad_(False)
         self.model.eval()
+        self.frozen = True
+
+    def unfreeze(self):
+        for param in self.model.parameters():
+            param.requires_grad_(True)
+        self.model.train()
+        self.frozen = False
 
     def forward(self, image):
         if image.shape[1] == 1:

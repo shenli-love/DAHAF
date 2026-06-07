@@ -12,12 +12,14 @@ TRAIN:
   gradient_weight: 6.0
   edge_weight: 3.0
   ssim_weight: 0.5
-  objectness_weight: 0.05
+  objectness_weight: 0.4
+  detail_weight: 1.0
+  semantic_weight: 0.2
   lambda_fusion: 1.0
   lambda_det: 0.05
-  warmup_epochs: 10
-  det_start_epoch: 40
-  det_full_epoch: 60
+  warmup_epochs: 5
+  det_start_epoch: 6
+  det_full_epoch: 15
 
 DATA:
   root: ./datasets/M3FD_Detection
@@ -33,8 +35,10 @@ DETECTION:
   loss_box: 7.5
   loss_cls: 0.5
   loss_dfl: 1.5
-  freeze: true
-  initial_no_grad: true
+  freeze: false
+  initial_no_grad: false
+  warmup_freeze_epochs: 5
+  lr_mult: 0.1
   task_dim: 64
   bridge_channels: 128
   objectness_guidance_alpha: 0.02

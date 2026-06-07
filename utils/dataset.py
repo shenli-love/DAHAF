@@ -19,7 +19,7 @@ DEFAULT_CLASSES = {
 }
 
 
-def letterbox_resize(image, target_size, interpolation=cv2.INTER_LINEAR, pad_value=0):
+def letterbox_resize(image, target_size, interpolation=cv2.INTER_AREA, pad_value=0):
     target_h, target_w = target_size
     if image.ndim == 3 and image.shape[2] == 1:
         image = image.squeeze(2)
@@ -126,21 +126,45 @@ class M3FDDataset(Dataset):
     def __getitem__(self, idx):
         name = self.samples[idx]
         ir = cv2.imread(os.path.join(self.ir_dir, f"{name}.png"), cv2.IMREAD_GRAYSCALE)
-        vis = cv2.imread(os.path.join(self.vis_dir, f"{name}.png"), cv2.IMREAD_GRAYSCALE)
+        vis = cv2.imread(os.path.join(self.vis_dir, f"{name}.png"), cv2.IMREAD_COLOR)
         if ir is None or vis is None:
             raise RuntimeError(f"Failed to load pair {name}")
 
-        ir, resize_meta = letterbox_resize(ir, self.image_size, interpolation=cv2.INTER_LINEAR)
-        vis, _ = letterbox_resize(vis, self.image_size, interpolation=cv2.INTER_LINEAR)
+        vis_orig_ycrcb = cv2.cvtColor(vis, cv2.COLOR_BGR2YCrCb)
+        vis_orig_y = vis_orig_ycrcb[:, :, 0].astype(np.float32) / 255.0
+        vis_blur = cv2.GaussianBlur(vis_orig_y, (5, 5), sigmaX=1.0, sigmaY=1.0)
+        vis_detail = ((vis_orig_y - vis_blur) + 1.0) * 0.5
+        vis_detail = np.clip(vis_detail, 0.0, 1.0).astype(np.float32)
+
+        ir, resize_meta = letterbox_resize(ir, self.image_size)
+        vis, _ = letterbox_resize(vis, self.image_size)
+        vis_detail, _ = letterbox_resize(
+            vis_detail,
+            self.image_size,
+            interpolation=cv2.INTER_AREA,
+            pad_value=0.5,
+        )
+        vis_ycrcb = cv2.cvtColor(vis, cv2.COLOR_BGR2YCrCb)
+        vis_y, vis_cr, vis_cb = cv2.split(vis_ycrcb)
+
+        target_h, target_w = vis_y.shape[:2]
+        vis_cb = cv2.resize(vis_cb, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        vis_cr = cv2.resize(vis_cr, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
         img_ir = torch.from_numpy(ir.astype(np.float32) / 255.0).unsqueeze(0)
-        img_vis = torch.from_numpy(vis.astype(np.float32) / 255.0).unsqueeze(0)
+        img_vis = torch.from_numpy(vis_y.astype(np.float32) / 255.0).unsqueeze(0)
+        img_vis_chroma = torch.from_numpy(
+            np.stack([vis_cb, vis_cr], axis=0).astype(np.float32) / 255.0
+        )
+        img_vis_detail = torch.from_numpy(vis_detail.astype(np.float32)).unsqueeze(0)
 
         boxes, labels = self._load_targets(name, resize_meta)
         target = {
             "boxes": torch.tensor(boxes, dtype=torch.float32) if boxes else torch.zeros((0, 4), dtype=torch.float32),
             "labels": torch.tensor(labels, dtype=torch.long) if labels else torch.zeros((0,), dtype=torch.long),
             "image_id": name,
+            "vis_chroma": img_vis_chroma,
+            "vis_detail": img_vis_detail,
             "orig_size": torch.tensor([resize_meta["orig_h"], resize_meta["orig_w"]], dtype=torch.float32),
             "resize_meta": {
                 "scale": torch.tensor(resize_meta["scale"], dtype=torch.float32),

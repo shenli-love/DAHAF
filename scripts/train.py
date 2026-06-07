@@ -78,6 +78,36 @@ def build_loader(cfg, split):
     )
 
 
+def build_optimizer(model, cfg):
+    base_lr = cfg["TRAIN"]["learning_rate"]
+    weight_decay = cfg["TRAIN"]["weight_decay"]
+    detector_lr = base_lr * cfg["DETECTION"].get("lr_mult", 0.1)
+
+    detector_param_ids = {id(param) for param in model.detector.parameters()}
+    detector_params = list(model.detector.parameters())
+    generator_params = [
+        param
+        for param in model.parameters()
+        if id(param) not in detector_param_ids and param.requires_grad
+    ]
+    param_groups = [{"params": generator_params, "lr": base_lr}]
+    if detector_params:
+        param_groups.append({"params": detector_params, "lr": detector_lr})
+    return AdamW(param_groups, weight_decay=weight_decay)
+
+
+def set_detection_training_state(model, cfg, epoch):
+    warmup_freeze_epochs = cfg["DETECTION"].get("warmup_freeze_epochs", 0)
+    freeze_detector = epoch <= warmup_freeze_epochs
+    if freeze_detector:
+        model.detector.freeze()
+        model.detector_initial_no_grad = True
+    else:
+        model.detector.unfreeze()
+        model.detector_initial_no_grad = False
+    return not freeze_detector
+
+
 def save_checkpoint(path, epoch, model, optimizer, scheduler, best_val):
     torch.save(
         {
@@ -140,18 +170,41 @@ def summarize_fusion_stats(fusion_stats):
 
 def train_one_epoch(model, loader, optimizer, fusion_loss, device, cfg, epoch):
     model.train()
+    detection_enabled = set_detection_training_state(model, cfg, epoch)
     totals = {"loss": 0.0, "fusion": 0.0, "det": 0.0}
     stage_weights = get_stage_weights(cfg, epoch)
     for step, (img_ir, img_vis, targets) in enumerate(loader, start=1):
         img_ir = img_ir.to(device, non_blocking=True)
         img_vis = img_vis.to(device, non_blocking=True)
+        img_vis_chroma = None
+        if targets and "vis_chroma" in targets[0]:
+            img_vis_chroma = torch.stack([target["vis_chroma"] for target in targets], dim=0)
+            img_vis_chroma = img_vis_chroma.to(device, non_blocking=True)
+        img_vis_detail = None
+        if targets and "vis_detail" in targets[0]:
+            img_vis_detail = torch.stack([target["vis_detail"] for target in targets], dim=0)
+            img_vis_detail = img_vis_detail.to(device, non_blocking=True)
 
-        outputs = model(img_ir, img_vis, targets=targets, run_detection=True)
+        outputs = model(
+            img_ir,
+            img_vis,
+            img_vis_chroma=img_vis_chroma,
+            detail_map=img_vis_detail,
+            targets=targets,
+            run_detection=detection_enabled,
+        )
         fused = outputs["fused"]
         objectness_map = None
         if outputs["task_signals"] is not None:
             objectness_map = outputs["task_signals"].get("obj")
-        loss_fusion, fusion_components = fusion_loss(fused, img_ir, img_vis, objectness_map=objectness_map)
+        loss_fusion, fusion_components = fusion_loss(
+            fused,
+            img_ir,
+            img_vis,
+            objectness_map=objectness_map,
+            detail_map=img_vis_detail,
+            semantic_detector=model.detector,
+        )
         loss_det, det_metrics = model.detection_loss(outputs, targets)
 
         total_loss = (
@@ -177,6 +230,8 @@ def train_one_epoch(model, loader, optimizer, fusion_loss, device, cfg, epoch):
                 f"int={fusion_components['intensity'].item():.4f} "
                 f"grad={fusion_components['gradient'].item():.4f} "
                 f"edge={fusion_components['edge'].item():.4f} "
+                f"detail={fusion_components['detail'].item():.4f} "
+                f"sem={fusion_components['semantic'].item():.4f} "
                 f"ssim={fusion_components['ssim'].item():.4f} "
                 f"obj={fusion_components['objectness'].item():.4f} "
                 f"box={det_metrics['box'].item():.4f} cls={det_metrics['cls'].item():.4f} "
@@ -197,17 +252,44 @@ def train_one_epoch(model, loader, optimizer, fusion_loss, device, cfg, epoch):
 @torch.no_grad()
 def validate(model, loader, fusion_loss, device, cfg):
     model.eval()
+    was_detector_frozen = model.detector.frozen
+    was_detector_no_grad = model.detector_initial_no_grad
+    model.detector.freeze()
+    model.detector_initial_no_grad = True
     totals = {"loss": 0.0, "fusion": 0.0, "det": 0.0}
     stage_weights = get_stage_weights(cfg, cfg["TRAIN"]["epochs"])
     for img_ir, img_vis, targets in loader:
         img_ir = img_ir.to(device, non_blocking=True)
         img_vis = img_vis.to(device, non_blocking=True)
-        outputs = model(img_ir, img_vis, targets=targets, run_detection=True)
+        img_vis_chroma = None
+        if targets and "vis_chroma" in targets[0]:
+            img_vis_chroma = torch.stack([target["vis_chroma"] for target in targets], dim=0)
+            img_vis_chroma = img_vis_chroma.to(device, non_blocking=True)
+        img_vis_detail = None
+        if targets and "vis_detail" in targets[0]:
+            img_vis_detail = torch.stack([target["vis_detail"] for target in targets], dim=0)
+            img_vis_detail = img_vis_detail.to(device, non_blocking=True)
+
+        outputs = model(
+            img_ir,
+            img_vis,
+            img_vis_chroma=img_vis_chroma,
+            detail_map=img_vis_detail,
+            targets=targets,
+            run_detection=True,
+        )
         fused = outputs["fused"]
         objectness_map = None
         if outputs["task_signals"] is not None:
             objectness_map = outputs["task_signals"].get("obj")
-        loss_fusion, _ = fusion_loss(fused, img_ir, img_vis, objectness_map=objectness_map)
+        loss_fusion, _ = fusion_loss(
+            fused,
+            img_ir,
+            img_vis,
+            objectness_map=objectness_map,
+            detail_map=img_vis_detail,
+            semantic_detector=model.detector,
+        )
         loss_det, _ = model.detection_loss(outputs, targets)
         total_loss = (
             stage_weights["fusion"] * loss_fusion +
@@ -219,6 +301,9 @@ def validate(model, loader, fusion_loss, device, cfg):
 
     for key in totals:
         totals[key] /= max(len(loader), 1)
+    if not was_detector_frozen:
+        model.detector.unfreeze()
+    model.detector_initial_no_grad = was_detector_no_grad
     return totals
 
 
@@ -236,13 +321,15 @@ def main():
     val_loader = build_loader(cfg, "val")
 
     model = build_model(cfg).to(device)
-    optimizer = AdamW(model.parameters(), lr=cfg["TRAIN"]["learning_rate"], weight_decay=cfg["TRAIN"]["weight_decay"])
+    optimizer = build_optimizer(model, cfg)
     scheduler = CosineAnnealingLR(optimizer, T_max=cfg["TRAIN"]["epochs"], eta_min=cfg["TRAIN"]["min_lr"])
     fusion_loss = FusionLoss(
         gradient_weight=cfg["TRAIN"]["gradient_weight"],
         edge_weight=cfg["TRAIN"].get("edge_weight", 2.0),
         ssim_weight=cfg["TRAIN"].get("ssim_weight", 1.0),
-        objectness_weight=cfg["TRAIN"].get("objectness_weight", 0.2),
+        objectness_weight=cfg["TRAIN"].get("objectness_weight", 0.4),
+        detail_weight=cfg["TRAIN"].get("detail_weight", 1.0),
+        semantic_weight=cfg["TRAIN"].get("semantic_weight", 0.2),
     ).to(device)
 
     start_epoch = 1

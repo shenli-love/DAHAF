@@ -3,5 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="DAHAF (2)" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="Remote Python 3.10.16 (sftp://root@vgkdw5e6k0c4p2etsnow.deepln.com:52817/root/.virtualenvs/DAHAF-Net/bin/python)" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="DAHAF" project-jdk-type="Python SDK" />
 </project>
