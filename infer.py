@@ -122,19 +122,17 @@ def _restore_chroma(chroma, chroma_meta, target_shape):
     return cb.clip(0.0, 1.0), cr.clip(0.0, 1.0)
 
 
+def apply_clahe(image, clip_limit=2.0, tile_grid_size=(8, 8)):
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+    return clahe.apply(image)
+
+
 def save_fused_image(fused, resize_meta, save_path, chroma=None, chroma_meta=None):
     fused_y = fused.squeeze().cpu().numpy()
     fused_y = undo_letterbox_image(fused_y, resize_meta, interpolation=cv2.INTER_LANCZOS4)
     fused_y = fused_y.clip(0.0, 1.0)
-
-    if chroma is None:
-        image = (fused_y * 255.0).clip(0, 255).astype("uint8")
-    else:
-        chroma_np = chroma.squeeze(0).detach().cpu().numpy()
-        cb, cr = _restore_chroma(chroma_np, chroma_meta or resize_meta, fused_y.shape[:2])
-        rgb = ycbcr_to_rgb(fused_y, cb, cr)
-        image = cv2.cvtColor((rgb * 255.0).clip(0, 255).astype("uint8"), cv2.COLOR_RGB2BGR)
-
+    image = (fused_y * 255.0).clip(0, 255).astype("uint8")
+    image = apply_clahe(image)
     cv2.imwrite(save_path, image)
 
 

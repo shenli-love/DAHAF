@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.models import VGG16_Weights, vgg16
 
 
 class SobelXY(nn.Module):
@@ -15,6 +16,58 @@ class SobelXY(nn.Module):
         grad_x = F.conv2d(x, self.weight_x, padding=1)
         grad_y = F.conv2d(x, self.weight_y, padding=1)
         return grad_x.abs() + grad_y.abs()
+
+
+class Laplacian(nn.Module):
+    def __init__(self):
+        super().__init__()
+        kernel = torch.tensor([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=torch.float32).view(1, 1, 3, 3)
+        self.register_buffer("weight", kernel)
+
+    def forward(self, x):
+        return F.conv2d(x, self.weight, padding=1).abs()
+
+
+class VGGPerceptualLoss(nn.Module):
+    def __init__(self, layer_ids=(3, 8, 15, 22)):
+        super().__init__()
+        weights = VGG16_Weights.DEFAULT
+        features = vgg16(weights=weights).features
+        max_layer = max(layer_ids) + 1
+        self.features = features[:max_layer].eval()
+        for param in self.features.parameters():
+            param.requires_grad_(False)
+
+        self.layer_ids = set(layer_ids)
+        mean = torch.tensor(weights.transforms().mean, dtype=torch.float32).view(1, 3, 1, 1)
+        std = torch.tensor(weights.transforms().std, dtype=torch.float32).view(1, 3, 1, 1)
+        self.register_buffer("mean", mean)
+        self.register_buffer("std", std)
+
+    def _prepare(self, x):
+        x = x.repeat(1, 3, 1, 1)
+        return (x - self.mean) / self.std
+
+    def forward(self, fused, img_ir, img_vis):
+        fused = self._prepare(fused)
+        img_ir = self._prepare(img_ir)
+        img_vis = self._prepare(img_vis)
+
+        loss = fused.new_zeros(())
+        feat_fused = fused
+        feat_ir = img_ir
+        feat_vis = img_vis
+        for idx, layer in enumerate(self.features):
+            feat_fused = layer(feat_fused)
+            with torch.no_grad():
+                feat_ir = layer(feat_ir)
+                feat_vis = layer(feat_vis)
+            if idx in self.layer_ids:
+                loss = loss + 0.5 * (
+                    F.l1_loss(feat_fused, feat_ir.detach()) +
+                    F.l1_loss(feat_fused, feat_vis.detach())
+                )
+        return loss / max(len(self.layer_ids), 1)
 
 
 class SSIMLoss(nn.Module):
@@ -45,16 +98,22 @@ class FusionLoss(nn.Module):
         objectness_weight=0.4,
         detail_weight=1.0,
         semantic_weight=0.2,
+        perceptual_weight=0.15,
+        local_window_size=7,
     ):
         super().__init__()
         self.sobel = SobelXY()
+        self.laplacian = Laplacian()
         self.ssim = SSIMLoss()
-        self.gradient_weight = gradient_weight
+        self.vgg_perceptual = VGGPerceptualLoss()
+        self.gradient_weight = gradient_weight * 2.0
         self.edge_weight = edge_weight
         self.ssim_weight = ssim_weight
         self.objectness_weight = objectness_weight
         self.detail_weight = detail_weight
         self.semantic_weight = semantic_weight
+        self.perceptual_weight = perceptual_weight
+        self.local_window_size = local_window_size
 
     @staticmethod
     def _set_requires_grad(module, requires_grad):
@@ -74,6 +133,12 @@ class FusionLoss(nn.Module):
         feat = F.normalize(feat, dim=1, eps=1e-6)
         target = F.normalize(target.detach(), dim=1, eps=1e-6)
         return F.mse_loss(feat, target)
+
+    def _local_variance(self, x):
+        kernel = self.local_window_size
+        mean = F.avg_pool2d(x, kernel, stride=1, padding=kernel // 2)
+        mean_sq = F.avg_pool2d(x * x, kernel, stride=1, padding=kernel // 2)
+        return (mean_sq - mean.pow(2)).clamp_min(0.0)
 
     def _semantic_consistency_loss(self, img_fused, img_ir, img_vis, semantic_detector):
         if semantic_detector is None:
@@ -108,23 +173,34 @@ class FusionLoss(nn.Module):
         detail_map=None,
         semantic_detector=None,
     ):
-        target_intensity = torch.maximum(img_ir, img_vis)
+        var_ir = self._local_variance(img_ir)
+        var_vis = self._local_variance(img_vis)
+        contrast_sum = var_ir + var_vis + 1e-6
+        weight_ir = var_ir / contrast_sum
+        weight_vis = var_vis / contrast_sum
+        target_intensity = weight_ir * img_ir + weight_vis * img_vis
         loss_intensity = F.l1_loss(img_fused, target_intensity)
 
         grad_fused = self.sobel(img_fused)
         grad_ir = self.sobel(img_ir)
         grad_vis = self.sobel(img_vis)
-        target_grad = torch.maximum(grad_ir, grad_vis)
+        target_grad = weight_ir * grad_ir + weight_vis * grad_vis
         source_grad = target_grad.detach()
         source_grad = source_grad / (source_grad.amax(dim=(-2, -1), keepdim=True) + 1e-6)
         gradient_weight_map = 1.0 + 2.0 * source_grad
         loss_gradient = (gradient_weight_map * (grad_fused - target_grad).abs()).mean()
 
+        lap_fused = self.laplacian(img_fused)
+        lap_ir = self.laplacian(img_ir)
+        lap_vis = self.laplacian(img_vis)
+        target_lap = weight_ir * lap_ir + weight_vis * lap_vis
         edge_weight_map = torch.ones_like(target_grad)
         if objectness_map is not None:
             objectness_map = F.interpolate(objectness_map, size=img_fused.shape[-2:], mode="bilinear", align_corners=False)
             edge_weight_map = edge_weight_map + 0.25 * objectness_map.detach().clamp(0.0, 1.0)
-        loss_edge = (edge_weight_map * (grad_fused - target_grad).abs()).mean()
+        loss_edge = (
+            edge_weight_map * ((grad_fused - target_grad).abs() + (lap_fused - target_lap).abs())
+        ).mean()
 
         loss_ssim = 0.5 * (self.ssim(img_fused, img_ir) + self.ssim(img_fused, img_vis))
 
@@ -145,6 +221,7 @@ class FusionLoss(nn.Module):
             loss_detail = (detail_weight_map * (img_fused - detail_map).abs()).mean()
 
         loss_semantic = self._semantic_consistency_loss(img_fused, img_ir, img_vis, semantic_detector)
+        loss_perceptual = self.vgg_perceptual(img_fused, img_ir, img_vis)
 
         total = (
             loss_intensity
@@ -154,6 +231,7 @@ class FusionLoss(nn.Module):
             + self.objectness_weight * loss_objectness
             + self.detail_weight * loss_detail
             + self.semantic_weight * loss_semantic
+            + self.perceptual_weight * loss_perceptual
         )
         components = {
             "intensity": loss_intensity,
@@ -163,5 +241,6 @@ class FusionLoss(nn.Module):
             "objectness": loss_objectness,
             "detail": loss_detail,
             "semantic": loss_semantic,
+            "perceptual": loss_perceptual,
         }
         return total, components

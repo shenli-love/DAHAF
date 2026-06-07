@@ -190,8 +190,9 @@ class DAHAFNet(nn.Module):
             "stats": fusion["stats"],
         }
 
-    def decode(self, fused_features, img_ir, img_vis_rgb, detail_map=None):
-        residual = 0.5 * (img_ir + img_vis_rgb.mean(dim=1, keepdim=True))
+    def decode(self, fused_features, img_ir, img_vis, detail_map=None):
+        vis_blur = F.avg_pool2d(img_vis, kernel_size=5, stride=1, padding=2)
+        residual = img_vis - vis_blur
         return self.decoder(
             fused_features["deep"],
             fused_features["mid"],
@@ -203,7 +204,7 @@ class DAHAFNet(nn.Module):
     def apply_objectness_guidance(self, fused, task_signals):
         if task_signals is None or "obj" not in task_signals:
             return fused
-        obj = task_signals["obj"].detach()
+        obj = task_signals["obj"]
         obj = F.interpolate(obj, size=fused.shape[-2:], mode="bilinear", align_corners=False)
         obj = obj.clamp(0.0, 1.0)
         detail = fused - F.avg_pool2d(fused, kernel_size=3, stride=1, padding=1)
