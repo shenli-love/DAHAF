@@ -173,6 +173,8 @@ def train_one_epoch(model, loader, optimizer, fusion_loss, device, cfg, epoch):
     detection_enabled = set_detection_training_state(model, cfg, epoch)
     totals = {"loss": 0.0, "fusion": 0.0, "det": 0.0}
     stage_weights = get_stage_weights(cfg, epoch)
+    semantic_start_epoch = cfg["TRAIN"].get("semantic_start_epoch", cfg["TRAIN"].get("det_start_epoch", 1))
+    semantic_interval = max(1, cfg["TRAIN"].get("semantic_interval", 1))
     for step, (img_ir, img_vis, targets) in enumerate(loader, start=1):
         img_ir = img_ir.to(device, non_blocking=True)
         img_vis = img_vis.to(device, non_blocking=True)
@@ -197,13 +199,16 @@ def train_one_epoch(model, loader, optimizer, fusion_loss, device, cfg, epoch):
         objectness_map = None
         if outputs["task_signals"] is not None:
             objectness_map = outputs["task_signals"].get("obj")
+        semantic_detector = None
+        if epoch >= semantic_start_epoch and step % semantic_interval == 0:
+            semantic_detector = model.detector
         loss_fusion, fusion_components = fusion_loss(
             fused,
             img_ir,
             img_vis,
             objectness_map=objectness_map,
             detail_map=img_vis_detail,
-            semantic_detector=model.detector,
+            semantic_detector=semantic_detector,
         )
         loss_det, det_metrics = model.detection_loss(outputs, targets)
 
@@ -250,14 +255,14 @@ def train_one_epoch(model, loader, optimizer, fusion_loss, device, cfg, epoch):
 
 
 @torch.no_grad()
-def validate(model, loader, fusion_loss, device, cfg):
+def validate(model, loader, fusion_loss, device, cfg, epoch):
     model.eval()
     was_detector_frozen = model.detector.frozen
     was_detector_no_grad = model.detector_initial_no_grad
     model.detector.freeze()
     model.detector_initial_no_grad = True
     totals = {"loss": 0.0, "fusion": 0.0, "det": 0.0}
-    stage_weights = get_stage_weights(cfg, cfg["TRAIN"]["epochs"])
+    stage_weights = get_stage_weights(cfg, epoch)
     for img_ir, img_vis, targets in loader:
         img_ir = img_ir.to(device, non_blocking=True)
         img_vis = img_vis.to(device, non_blocking=True)
@@ -288,7 +293,7 @@ def validate(model, loader, fusion_loss, device, cfg):
             img_vis,
             objectness_map=objectness_map,
             detail_map=img_vis_detail,
-            semantic_detector=model.detector,
+            semantic_detector=None,
         )
         loss_det, _ = model.detection_loss(outputs, targets)
         total_loss = (
@@ -354,7 +359,7 @@ def main():
         tic = time.time()
         train_stats = train_one_epoch(model, train_loader, optimizer, fusion_loss, device, cfg, epoch)
         scheduler.step()
-        val_stats = validate(model, val_loader, fusion_loss, device, cfg)
+        val_stats = validate(model, val_loader, fusion_loss, device, cfg, epoch)
 
         writer.add_scalar("train/total", train_stats["loss"], epoch)
         writer.add_scalar("train/fusion", train_stats["fusion"], epoch)

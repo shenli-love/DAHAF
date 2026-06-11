@@ -3,18 +3,20 @@ MODEL:
   dims: [32, 64, 128]
 
 TRAIN:
-  batch_size: 2
-  epochs: 100
+  batch_size: 4
+  epochs: 10
   learning_rate: 0.0001
   min_lr: 0.000001
   weight_decay: 0.0001
   grad_clip: 5.0
   gradient_weight: 6.0
-  edge_weight: 3.0
-  ssim_weight: 0.5
+  edge_weight: 1.5
+  ssim_weight: 0.6
   objectness_weight: 0.4
-  detail_weight: 1.0
-  semantic_weight: 0.2
+  detail_weight: 3.0
+  semantic_weight: 0.1
+  semantic_start_epoch: 6
+  semantic_interval: 4
   lambda_fusion: 1.0
   lambda_det: 0.05
   warmup_epochs: 5
@@ -23,7 +25,7 @@ TRAIN:
 
 DATA:
   root: ./datasets/M3FD_Detection
-  image_size: [192, 192]
+  image_size: [256, 256]
   num_workers: 0
   pin_memory: true
 
@@ -31,7 +33,7 @@ DETECTION:
   num_classes: 6
   detector_cfg: yolo11n.yaml
   detector_pretrained: yolo11n.pt
-  detector_input_size: 192
+  detector_input_size: 256
   loss_box: 7.5
   loss_cls: 0.5
   loss_dfl: 1.5

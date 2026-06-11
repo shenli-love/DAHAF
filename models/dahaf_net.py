@@ -147,24 +147,18 @@ class DAHAFNet(nn.Module):
         return ir_feats, vis_feats, chroma_feats, detail_feats
 
     def build_mid_features(self, ir_feats, vis_feats, chroma_feats=None, detail_feats=None):
-        chroma_mid = (
-            chroma_feats["stage2"]
-            if chroma_feats is not None
-            else torch.zeros_like(vis_feats["stage2"])
-        )
+        chroma_mid = torch.zeros_like(vis_feats["stage2"])
         detail_mid = detail_feats["stage2"] if detail_feats is not None else 0.0
         return self.mid_fusion(torch.cat([ir_feats["stage2"], vis_feats["stage2"], chroma_mid + detail_mid], dim=1))
 
     def _enhance_vis_with_aux(self, vis_feat, chroma_feat, detail_feat, stage_name):
         aux_feat = None
-        if chroma_feat is not None:
-            aux_feat = chroma_feat
         if detail_feat is not None:
             detail_gate = self.vis_detail_gate[stage_name](detail_feat)
-            aux_feat = detail_gate * detail_feat if aux_feat is None else aux_feat + detail_gate * detail_feat
+            aux_feat = detail_gate * detail_feat
         if aux_feat is None:
             return vis_feat
-        gate = self.vis_chroma_gate[stage_name](aux_feat)
+        gate = self.vis_detail_gate[stage_name](aux_feat)
         return vis_feat + gate * aux_feat
 
     def fuse_features(self, ir_feats, vis_feats, mid_fused, chroma_feats=None, detail_feats=None, task_signals=None):
@@ -191,7 +185,7 @@ class DAHAFNet(nn.Module):
         }
 
     def decode(self, fused_features, img_ir, img_vis, detail_map=None):
-        vis_blur = F.avg_pool2d(img_vis, kernel_size=5, stride=1, padding=2)
+        vis_blur = F.avg_pool2d(img_vis, kernel_size=7, stride=1, padding=3)
         residual = img_vis - vis_blur
         return self.decoder(
             fused_features["deep"],
@@ -208,7 +202,7 @@ class DAHAFNet(nn.Module):
         obj = F.interpolate(obj, size=fused.shape[-2:], mode="bilinear", align_corners=False)
         obj = obj.clamp(0.0, 1.0)
         detail = fused - F.avg_pool2d(fused, kernel_size=3, stride=1, padding=1)
-        guided = fused + self.objectness_guidance_alpha * obj * detail
+        guided = fused + 0.5 * self.objectness_guidance_alpha * obj * detail
         return guided.clamp(0.0, 1.0)
 
     def forward(

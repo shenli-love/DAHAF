@@ -33,7 +33,7 @@ class UpBlock(nn.Module):
         self.fuse = ResidualConvBlock(in_channels + skip_channels, out_channels)
 
     def forward(self, x, skip):
-        x = F.interpolate(x, size=skip.shape[-2:], mode="nearest")
+        x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
         return self.fuse(torch.cat([x, skip], dim=1))
 
 
@@ -115,15 +115,15 @@ class DE_Decoder(nn.Module):
         out = self.output(feat)
 
         if detail_map is not None:
-            out = out + 0.15 * self.detail_refine(feat, detail_map)
+            out = out + 0.08 * self.detail_refine(feat, detail_map)
 
         if residual is not None:
             residual_detail = residual - F.avg_pool2d(residual, kernel_size=3, stride=1, padding=1)
             edge_hint = torch.abs(residual_detail)
             edge_residual = self.edge_head(feat, edge_hint)
             detail_residual = self.residual_detail(torch.cat([out, residual_detail], dim=1))
-            out = out + 0.20 * detail_residual + 0.12 * edge_residual
+            out = out + 0.08 * detail_residual + 0.05 * edge_residual
             detail = self.detail_enhance(out)
-            out = out + 0.10 * detail
+            out = out + 0.04 * detail
 
-        return out.clamp(0.0, 1.0)
+        return torch.sigmoid(out)

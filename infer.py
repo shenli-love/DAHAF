@@ -85,8 +85,8 @@ def load_single_visible_ycbcr(path, image_size, device):
     orig_ycrcb = cv2.cvtColor(image, cv2.COLOR_BGR2YCrCb)
     orig_y = orig_ycrcb[:, :, 0].astype(np.float32) / 255.0
     blur = cv2.GaussianBlur(orig_y, (5, 5), sigmaX=1.0, sigmaY=1.0)
-    detail = ((orig_y - blur) + 1.0) * 0.5
-    detail = np.clip(detail, 0.0, 1.0).astype(np.float32)
+    detail = np.abs(orig_y - blur)
+    detail = np.clip(detail * 4.0, 0.0, 1.0).astype(np.float32)
 
     image, resize_meta = letterbox_resize(image, image_size)
     detail, _ = letterbox_resize(detail, image_size, interpolation=cv2.INTER_AREA, pad_value=0.5)
@@ -122,7 +122,7 @@ def _restore_chroma(chroma, chroma_meta, target_shape):
     return cb.clip(0.0, 1.0), cr.clip(0.0, 1.0)
 
 
-def apply_clahe(image, clip_limit=2.0, tile_grid_size=(8, 8)):
+def apply_clahe(image, clip_limit=1.2, tile_grid_size=(8, 8)):
     clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
     return clahe.apply(image)
 
@@ -132,7 +132,6 @@ def save_fused_image(fused, resize_meta, save_path, chroma=None, chroma_meta=Non
     fused_y = undo_letterbox_image(fused_y, resize_meta, interpolation=cv2.INTER_LANCZOS4)
     fused_y = fused_y.clip(0.0, 1.0)
     image = (fused_y * 255.0).clip(0, 255).astype("uint8")
-    image = apply_clahe(image)
     cv2.imwrite(save_path, image)
 
 

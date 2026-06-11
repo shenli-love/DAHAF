@@ -92,23 +92,35 @@ class M3FDDataset(Dataset):
         self.xml_dir = os.path.join(root, "Annotation")
         self.label_dir = os.path.join(root, "labels")
         self.meta_dir = os.path.join(root, "meta")
+        self.ir_files = self._index_images(self.ir_dir)
+        self.vis_files = self._index_images(self.vis_dir)
         self.samples = self._build_index(split)
 
         if not self.samples:
             raise RuntimeError(f"No samples found under {root}")
 
+    @staticmethod
+    def _index_images(directory):
+        paths = []
+        for ext in ("*.png", "*.jpg", "*.jpeg", "*.bmp"):
+            paths.extend(glob.glob(os.path.join(directory, ext)))
+        return {
+            os.path.splitext(os.path.basename(path))[0]: path
+            for path in paths
+        }
+
     def _build_index(self, split):
         meta_path = os.path.join(self.meta_dir, f"{split}.txt")
         if os.path.isfile(meta_path):
             with open(meta_path, "r", encoding="utf-8") as handle:
-                names = [line.strip() for line in handle if line.strip()]
-            return names
+                names = [
+                    os.path.splitext(os.path.basename(line.strip()))[0]
+                    for line in handle
+                    if line.strip()
+                ]
+            return [name for name in names if name in self.ir_files and name in self.vis_files]
 
-        ir_paths = glob.glob(os.path.join(self.ir_dir, "*.png")) + \
-                   glob.glob(os.path.join(self.ir_dir, "*.jpg")) + \
-                   glob.glob(os.path.join(self.ir_dir, "*.bmp"))
-
-        names = sorted(os.path.splitext(os.path.basename(path))[0] for path in ir_paths)
+        names = sorted(name for name in self.ir_files if name in self.vis_files)
         if not names:
             print(f"Warning: No images found in {self.ir_dir}")
             return []
@@ -125,16 +137,16 @@ class M3FDDataset(Dataset):
 
     def __getitem__(self, idx):
         name = self.samples[idx]
-        ir = cv2.imread(os.path.join(self.ir_dir, f"{name}.png"), cv2.IMREAD_GRAYSCALE)
-        vis = cv2.imread(os.path.join(self.vis_dir, f"{name}.png"), cv2.IMREAD_COLOR)
+        ir = cv2.imread(self.ir_files.get(name, ""), cv2.IMREAD_GRAYSCALE)
+        vis = cv2.imread(self.vis_files.get(name, ""), cv2.IMREAD_COLOR)
         if ir is None or vis is None:
             raise RuntimeError(f"Failed to load pair {name}")
 
         vis_orig_ycrcb = cv2.cvtColor(vis, cv2.COLOR_BGR2YCrCb)
         vis_orig_y = vis_orig_ycrcb[:, :, 0].astype(np.float32) / 255.0
         vis_blur = cv2.GaussianBlur(vis_orig_y, (5, 5), sigmaX=1.0, sigmaY=1.0)
-        vis_detail = ((vis_orig_y - vis_blur) + 1.0) * 0.5
-        vis_detail = np.clip(vis_detail, 0.0, 1.0).astype(np.float32)
+        vis_detail = np.abs(vis_orig_y - vis_blur)
+        vis_detail = np.clip(vis_detail * 4.0, 0.0, 1.0).astype(np.float32)
 
         ir, resize_meta = letterbox_resize(ir, self.image_size)
         vis, _ = letterbox_resize(vis, self.image_size)

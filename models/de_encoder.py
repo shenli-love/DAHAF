@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def make_norm(channels, num_groups=8):
@@ -54,7 +55,7 @@ class C2f(nn.Module):
         return self.act(self.bn(self.cv2(torch.cat(parts, dim=1))))
 
 
-class LowFreqExtractor(nn.Module):
+class FeatureExtractor(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.block1 = C2f(channels, num_blocks=6)
@@ -64,46 +65,83 @@ class LowFreqExtractor(nn.Module):
         return self.block2(self.block1(x))
 
 
-class AffineCoupling(nn.Module):
-    def __init__(self, channels):
+class GuidedFilter(nn.Module):
+    def __init__(self, radius, eps):
         super().__init__()
-        half = channels // 2
-        self.shuffle = nn.Conv2d(channels, channels, kernel_size=1, bias=True)
-        self.phi = self._make_subnet(half)
-        self.rho = self._make_subnet(half)
-        self.eta = self._make_subnet(half)
+        self.radius = int(radius)
+        self.eps = float(eps)
 
-    @staticmethod
-    def _make_subnet(channels):
-        return nn.Sequential(
-            nn.Conv2d(channels, channels, kernel_size=1, bias=False),
-            make_norm(channels),
-            nn.SiLU(inplace=True),
+    def _box_filter(self, x):
+        if self.radius <= 0:
+            return x
+        radius_h = min(self.radius, max((x.shape[-2] - 1) // 2, 0))
+        radius_w = min(self.radius, max((x.shape[-1] - 1) // 2, 0))
+        if radius_h == 0 and radius_w == 0:
+            return x
+        kernel_size = (radius_h * 2 + 1, radius_w * 2 + 1)
+        padding = (radius_h, radius_w)
+        return F.avg_pool2d(x, kernel_size=kernel_size, stride=1, padding=padding, count_include_pad=False)
+
+    def forward(self, guide, src):
+        mean_i = self._box_filter(guide)
+        mean_p = self._box_filter(src)
+        mean_ip = self._box_filter(guide * src)
+        cov_ip = mean_ip - mean_i * mean_p
+
+        mean_ii = self._box_filter(guide * guide)
+        var_i = mean_ii - mean_i * mean_i
+
+        a = cov_ip / (var_i + self.eps)
+        b = mean_p - a * mean_i
+        mean_a = self._box_filter(a)
+        mean_b = self._box_filter(b)
+
+        low = mean_a * guide + mean_b
+        high = src - low
+        return low, high
+
+
+class GuidedFrequencyDecomposition(nn.Module):
+    def __init__(self, channels, radius, eps, detail_gain=1.0):
+        super().__init__()
+        self.guided = GuidedFilter(radius=radius, eps=eps)
+        self.low_proj = nn.Sequential(
             nn.Conv2d(channels, channels, kernel_size=3, padding=1, groups=channels, bias=False),
             make_norm(channels),
             nn.SiLU(inplace=True),
             nn.Conv2d(channels, channels, kernel_size=1, bias=False),
+            make_norm(channels),
+            nn.SiLU(inplace=True),
         )
+        self.high_proj = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1, groups=channels, bias=False),
+            make_norm(channels),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(channels, channels, kernel_size=1, bias=False),
+            make_norm(channels),
+            nn.SiLU(inplace=True),
+        )
+        self.mix = nn.Sequential(
+            nn.Conv2d(channels * 3, channels, kernel_size=1, bias=False),
+            make_norm(channels),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False),
+            make_norm(channels),
+            nn.SiLU(inplace=True),
+        )
+        self.detail_scale = nn.Parameter(torch.tensor(float(detail_gain)))
 
     def forward(self, x):
-        z1, z2 = self.shuffle(x).chunk(2, dim=1)
-        z2 = z2 + self.phi(z1)
-        scale = torch.tanh(self.rho(z2))
-        z1 = z1 * torch.exp(scale) + self.eta(z2)
-        return torch.cat([z1, z2], dim=1)
-
-
-class HighFreqExtractor(nn.Module):
-    def __init__(self, channels, num_layers=3):
-        super().__init__()
-        self.layers = nn.Sequential(*[AffineCoupling(channels) for _ in range(num_layers)])
-
-    def forward(self, x):
-        return self.layers(x)
+        low, high = self.guided(x, x)
+        low = self.low_proj(low)
+        high = self.high_proj(high)
+        detail = (0.5 + torch.sigmoid(self.detail_scale)) * high
+        fused = x + self.mix(torch.cat([x, low, detail], dim=1))
+        return fused, low, detail
 
 
 class EncoderStage(nn.Module):
-    def __init__(self, in_channels, out_channels, num_extractors=1, downsample=False):
+    def __init__(self, in_channels, out_channels, num_extractors=1, downsample=False, radius=3, eps=1e-3, detail_gain=1.0):
         super().__init__()
         layers = []
         if downsample:
@@ -120,25 +158,28 @@ class EncoderStage(nn.Module):
             ])
 
         for _ in range(num_extractors):
-            layers.append(LowFreqExtractor(out_channels))
+            layers.append(FeatureExtractor(out_channels))
         self.body = nn.Sequential(*layers)
-        self.base_branch = LowFreqExtractor(out_channels)
-        self.detail_branch = HighFreqExtractor(out_channels)
+        self.decomposition = GuidedFrequencyDecomposition(
+            out_channels,
+            radius=radius,
+            eps=eps,
+            detail_gain=detail_gain,
+        )
 
     def forward(self, x):
         feat = self.body(x)
-        base = self.base_branch(feat)
-        detail = self.detail_branch(feat)
-        return feat, base, detail
+        fused, base, detail = self.decomposition(feat)
+        return fused, base, detail
 
 
 class DE_Encoder(nn.Module):
     def __init__(self, inp_channels=1, dims=(64, 128, 256)):
         super().__init__()
         self.patch_embed = OverlapPatchEmbed(inp_channels, dims[0])
-        self.stage1 = EncoderStage(dims[0], dims[0], num_extractors=5, downsample=False)
-        self.stage2 = EncoderStage(dims[0], dims[1], num_extractors=2, downsample=True)
-        self.stage3 = EncoderStage(dims[1], dims[2], num_extractors=1, downsample=True)
+        self.stage1 = EncoderStage(dims[0], dims[0], num_extractors=5, downsample=False, radius=7, eps=5e-3, detail_gain=1.2)
+        self.stage2 = EncoderStage(dims[0], dims[1], num_extractors=2, downsample=True, radius=5, eps=2e-3, detail_gain=1.0)
+        self.stage3 = EncoderStage(dims[1], dims[2], num_extractors=1, downsample=True, radius=3, eps=1e-3, detail_gain=0.8)
 
     def forward(self, x):
         x0 = self.patch_embed(x)

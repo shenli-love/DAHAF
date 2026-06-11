@@ -1,3 +1,8 @@
 datasets/
 check-test/
 checkpoints/
+checkpoints1/
+
+*.pth
+*.pt
+checkpoints/
