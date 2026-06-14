@@ -2,7 +2,6 @@ from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from ultralytics import YOLO
 from ultralytics.nn.tasks import DetectionModel
 
@@ -125,40 +124,3 @@ class YOLO11Detector(nn.Module):
             "dfl": detached[2].detach(),
         }
         return total, metrics
-
-
-class TaskBridge(nn.Module):
-    def __init__(self, detector_channels, fusion_dim=64, bridge_channels=128):
-        super().__init__()
-        self.projections = nn.ModuleList(
-            [nn.Conv2d(ch, bridge_channels, kernel_size=1, bias=False) for ch in detector_channels]
-        )
-        self.proj_norms = nn.ModuleList([nn.BatchNorm2d(bridge_channels) for _ in detector_channels])
-        self.fusion = nn.Sequential(
-            nn.Conv2d(bridge_channels * len(detector_channels), bridge_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(bridge_channels),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(bridge_channels, bridge_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(bridge_channels),
-            nn.SiLU(inplace=True),
-        )
-        self.object_head = nn.Conv2d(bridge_channels, 1, kernel_size=1)
-
-    def forward(self, det_feats, ir_feats, vis_feats, mid_fused):
-        deep_size = ir_feats["stage3"].shape[-2:]
-        mid_size = mid_fused.shape[-2:]
-
-        projected = []
-        for feat, proj, norm in zip(det_feats, self.projections, self.proj_norms):
-            feat = F.silu(norm(proj(feat)))
-            projected.append(F.interpolate(feat, size=deep_size, mode="bilinear", align_corners=False))
-
-        bridge_feat = self.fusion(torch.cat(projected, dim=1))
-        object_map = torch.sigmoid(self.object_head(bridge_feat))
-        object_mid = F.interpolate(object_map, size=mid_size, mode="bilinear", align_corners=False)
-
-        return {
-            "mid": mid_fused,
-            "obj": object_mid,
-            "bridge_feat": bridge_feat,
-        }

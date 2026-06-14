@@ -107,8 +107,22 @@ class DE_Decoder(nn.Module):
             nn.LeakyReLU(0.1, inplace=True),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
         )
+        self.mask_refine = nn.Sequential(
+            nn.Conv2d(out_channels + 2, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.LeakyReLU(0.1, inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+        )
 
-    def forward(self, fused_deep, skip_mid, skip_shallow, residual=None, detail_map=None):
+    @staticmethod
+    def _mask_boundary(mask):
+        grad_x = mask[:, :, :, 1:] - mask[:, :, :, :-1]
+        grad_x = F.pad(grad_x.abs(), (0, 1, 0, 0))
+        grad_y = mask[:, :, 1:, :] - mask[:, :, :-1, :]
+        grad_y = F.pad(grad_y.abs(), (0, 0, 0, 1))
+        return (grad_x + grad_y).clamp(0.0, 1.0)
+
+    def forward(self, fused_deep, skip_mid, skip_shallow, residual=None, detail_map=None, mask_prior=None):
         feat = self.stem(fused_deep)
         feat = self.up_mid(feat, skip_mid)
         feat = self.up_shallow(feat, skip_shallow)
@@ -125,5 +139,12 @@ class DE_Decoder(nn.Module):
             out = out + 0.08 * detail_residual + 0.05 * edge_residual
             detail = self.detail_enhance(out)
             out = out + 0.04 * detail
+
+        if mask_prior is not None:
+            mask_prior = F.interpolate(mask_prior, size=out.shape[-2:], mode="bilinear", align_corners=False)
+            mask_prior = mask_prior.clamp(0.0, 1.0)
+            boundary = self._mask_boundary(mask_prior)
+            refined = self.mask_refine(torch.cat([out, mask_prior, boundary], dim=1))
+            out = out + 0.08 * mask_prior * refined + 0.04 * boundary * refined
 
         return torch.sigmoid(out)

@@ -12,16 +12,15 @@ TRAIN:
   gradient_weight: 6.0
   edge_weight: 1.5
   ssim_weight: 0.6
-  objectness_weight: 0.4
+  mask_region_weight: 0.4
+  mask_boundary_weight: 0.8
   detail_weight: 3.0
-  semantic_weight: 0.1
-  semantic_start_epoch: 6
-  semantic_interval: 4
   lambda_fusion: 1.0
-  lambda_det: 0.05
+  lambda_aux_det: 0.0
   warmup_epochs: 5
-  det_start_epoch: 6
-  det_full_epoch: 15
+
+MASK_GUIDANCE:
+  guidance_alpha: 0.08
 
 DATA:
   root: ./datasets/M3FD_Detection
@@ -30,6 +29,7 @@ DATA:
   pin_memory: true
 
 DETECTION:
+  enabled: false
   num_classes: 6
   detector_cfg: yolo11n.yaml
   detector_pretrained: yolo11n.pt
@@ -41,9 +41,6 @@ DETECTION:
   initial_no_grad: false
   warmup_freeze_epochs: 5
   lr_mult: 0.1
-  task_dim: 64
-  bridge_channels: 128
-  objectness_guidance_alpha: 0.02
 
 LOG:
   print_interval: 20

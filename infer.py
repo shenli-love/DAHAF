@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument("--output", type=str, default="outputs")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--num-samples", type=int, default=50)
-    parser.add_argument("--with-det", action="store_true")
+    parser.add_argument("--with-aux-det", action="store_true")
     parser.add_argument("--ir-path", type=str, default=None, help="Optional single infrared image path.")
     parser.add_argument("--vis-path", type=str, default=None, help="Optional single visible image path.")
     parser.add_argument("--output-name", type=str, default="fused_result")
@@ -49,9 +49,8 @@ def build_model(cfg, device):
         detector_pretrained=cfg["DETECTION"]["detector_pretrained"],
         detector_freeze=cfg["DETECTION"]["freeze"],
         detector_initial_no_grad=cfg["DETECTION"]["initial_no_grad"],
-        task_dim=cfg["DETECTION"]["task_dim"],
-        bridge_channels=cfg["DETECTION"]["bridge_channels"],
-        objectness_guidance_alpha=cfg["DETECTION"].get("objectness_guidance_alpha", 0.05),
+        use_aux_detector=cfg["DETECTION"].get("enabled", False),
+        mask_guidance_alpha=cfg["MASK_GUIDANCE"].get("guidance_alpha", 0.08),
     ).to(device)
     return model
 
@@ -165,7 +164,7 @@ def run_single_image(model, cfg, device, args):
             img_vis_chroma=img_vis_chroma,
             detail_map=img_vis_detail,
             targets=targets,
-            run_detection=args.with_det,
+            run_detection=args.with_aux_det,
         )
 
     os.makedirs(args.output, exist_ok=True)
@@ -202,7 +201,7 @@ def run_dataset_inference(model, cfg, device, args):
                 img_vis_chroma=img_vis_chroma,
                 detail_map=img_vis_detail,
                 targets=targets,
-                run_detection=args.with_det,
+                run_detection=args.with_aux_det,
             )
 
             image_id = targets[0]["image_id"]

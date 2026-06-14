@@ -1,6 +1,6 @@
 # DAHAF-Net Lite
 
-DAHAF-Net Lite is a lightweight infrared-visible image fusion project built around a single-path fusion pipeline.
+DAHAF-Net Lite is a lightweight infrared-visible image fusion project built around a SAM-guided pixel-aware fusion pipeline.
 
 ## Active Pipeline
 
@@ -9,10 +9,9 @@ IR / VIS
   -> Dual Encoder
   -> HCFB Lite Fusion Core
   -> Edge-Refined U-Decoder
+  -> SAM Mask Guidance Branch
+  -> Mask-Guided Pixel Refinement
   -> Fused Image
-  -> Frozen Detector (single pass)
-  -> Objectness-Only Guidance
-  -> Final Fused Output
 ```
 
 ## Training
@@ -40,6 +39,7 @@ models/
   de_encoder.py
   hcfb.py
   decoder.py
+  sam_mask_guidance.py
   yolo11_bridge.py
   dahaf_net.py
 utils/
@@ -57,7 +57,6 @@ analyze_model.py
 
 - Encoder channels: `32 / 64 / 128`
 - Decoder: edge-refined U-Net/FPN style
-- Task guidance: objectness-only
-- Detection branch: single frozen detector pass
-- Fusion loss: intensity + gradient + edge-aware + SSIM + weak objectness auxiliary
-
+- Pixel guidance: SAM-style soft mask prior from `SAMMaskGuidanceBranch`
+- Detector: optional auxiliary supervision only, disabled by default
+- Fusion loss: intensity + gradient + edge-aware + SSIM + mask-region consistency + mask-boundary sharpening

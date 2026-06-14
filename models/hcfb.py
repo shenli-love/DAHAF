@@ -67,17 +67,17 @@ class CrossGatedLocalMixer(nn.Module):
         self.gate_ir = nn.Parameter(torch.tensor(0.0))
         self.gate_vis = nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, f_ir, f_vis, objectness=None):
+    def forward(self, f_ir, f_vis, mask_prior=None):
         ir_local = self.ir_local(f_ir)
         vis_local = self.vis_local(f_vis)
         discrepancy = (f_ir - f_vis).abs()
 
-        if objectness is None:
-            objectness = f_ir.new_zeros(f_ir.shape[0], 1, f_ir.shape[2], f_ir.shape[3])
+        if mask_prior is None:
+            mask_prior = f_ir.new_zeros(f_ir.shape[0], 1, f_ir.shape[2], f_ir.shape[3])
         else:
-            objectness = F.interpolate(objectness, size=f_ir.shape[-2:], mode="bilinear", align_corners=False)
+            mask_prior = F.interpolate(mask_prior, size=f_ir.shape[-2:], mode="bilinear", align_corners=False)
 
-        spatial_logits = self.spatial_gate(torch.cat([ir_local, vis_local, discrepancy, objectness], dim=1))
+        spatial_logits = self.spatial_gate(torch.cat([ir_local, vis_local, discrepancy, mask_prior], dim=1))
         spatial_ir, spatial_vis = torch.chunk(spatial_logits.softmax(dim=1), 2, dim=1)
 
         channel_weights = self.channel_gate(torch.cat([ir_local, vis_local], dim=1))
@@ -104,23 +104,23 @@ class TaskAwareDetailInjection(nn.Module):
         )
         self.scale = nn.Parameter(torch.tensor(0.2))
 
-    def forward(self, f_vis, detail_feat=None, objectness=None):
+    def forward(self, f_vis, detail_feat=None, mask_prior=None):
         if detail_feat is None:
             return f_vis, None
 
         detail_feat = F.interpolate(detail_feat, size=f_vis.shape[-2:], mode="bilinear", align_corners=False)
-        if objectness is None:
-            objectness = f_vis.new_zeros(f_vis.shape[0], 1, f_vis.shape[2], f_vis.shape[3])
+        if mask_prior is None:
+            mask_prior = f_vis.new_zeros(f_vis.shape[0], 1, f_vis.shape[2], f_vis.shape[3])
         else:
-            objectness = F.interpolate(objectness, size=f_vis.shape[-2:], mode="bilinear", align_corners=False)
-            objectness = objectness.clamp(0.0, 1.0)
+            mask_prior = F.interpolate(mask_prior, size=f_vis.shape[-2:], mode="bilinear", align_corners=False)
+            mask_prior = mask_prior.clamp(0.0, 1.0)
 
-        gate = self.gate(torch.cat([f_vis, detail_feat, objectness], dim=1))
-        task_weight = 0.25 + 0.75 * objectness
+        gate = self.gate(torch.cat([f_vis, detail_feat, mask_prior], dim=1))
+        task_weight = 0.25 + 0.75 * mask_prior
         injected = f_vis + torch.sigmoid(self.scale) * task_weight * gate * detail_feat
         return injected, {
             "gate": gate.detach(),
-            "objectness": objectness.detach(),
+            "mask_prior": mask_prior.detach(),
         }
 
 
@@ -167,19 +167,19 @@ class SpatialBaseDetailFusion(nn.Module):
         grad_y = F.pad(grad_y.abs(), (0, 0, 0, 1))
         return (grad_x + grad_y).mean(dim=1, keepdim=True)
 
-    def forward(self, f_ir, f_vis, objectness=None):
+    def forward(self, f_ir, f_vis, mask_prior=None):
         base_ir, detail_ir = self._split(f_ir)
         base_vis, detail_vis = self._split(f_vis)
         edge_ir = self._edge_strength(detail_ir)
         edge_vis = self._edge_strength(detail_vis)
         edge_feat = self.edge_proj(torch.cat([edge_ir, edge_vis], dim=1))
 
-        if objectness is None:
-            objectness = f_ir.new_zeros(f_ir.shape[0], 1, f_ir.shape[2], f_ir.shape[3])
+        if mask_prior is None:
+            mask_prior = f_ir.new_zeros(f_ir.shape[0], 1, f_ir.shape[2], f_ir.shape[3])
         else:
-            objectness = F.interpolate(objectness, size=f_ir.shape[-2:], mode="bilinear", align_corners=False)
+            mask_prior = F.interpolate(mask_prior, size=f_ir.shape[-2:], mode="bilinear", align_corners=False)
 
-        weights = self.router(torch.cat([f_ir, f_vis, edge_feat, objectness], dim=1))
+        weights = self.router(torch.cat([f_ir, f_vis, edge_feat, mask_prior], dim=1))
         base_logits, detail_logits = torch.chunk(weights, 2, dim=1)
         base_weights = F.softmax(base_logits / self.router_temperature, dim=1)
         detail_weights = F.softmax(detail_logits / self.router_temperature, dim=1)
@@ -217,11 +217,11 @@ class HCFBLevel(nn.Module):
         self.mixer = CrossGatedLocalMixer(channels)
         self.fusion = SpatialBaseDetailFusion(channels)
 
-    def forward(self, f_ir, f_vis, objectness=None, detail_feat=None):
-        f_vis, detail_stats = self.detail_inject(f_vis, detail_feat=detail_feat, objectness=objectness)
+    def forward(self, f_ir, f_vis, mask_prior=None, detail_feat=None):
+        f_vis, detail_stats = self.detail_inject(f_vis, detail_feat=detail_feat, mask_prior=mask_prior)
         w_ir, w_vis = self.mce(f_ir, f_vis)
-        f_ir, f_vis = self.mixer(f_ir * w_ir, f_vis * w_vis, objectness=objectness)
-        fused, router_weights = self.fusion(f_ir, f_vis, objectness=objectness)
+        f_ir, f_vis = self.mixer(f_ir * w_ir, f_vis * w_vis, mask_prior=mask_prior)
+        fused, router_weights = self.fusion(f_ir, f_vis, mask_prior=mask_prior)
         return fused, {
             "w_ir": w_ir,
             "w_vis": w_vis,
@@ -233,7 +233,7 @@ class HCFBLevel(nn.Module):
 class HCFB(nn.Module):
     """Lite hierarchical fusion core."""
 
-    def __init__(self, shallow_channels=64, deep_channels=256, task_dim=64, shallow_heads=4, deep_heads=8):
+    def __init__(self, shallow_channels=64, deep_channels=256):
         super().__init__()
         self.level1 = HCFBLevel(shallow_channels)
         self.level2 = HCFBLevel(deep_channels)
@@ -245,24 +245,23 @@ class HCFB(nn.Module):
         shallow_vis,
         deep_ir,
         deep_vis,
-        task_signals=None,
+        mask_prior=None,
         shallow_detail=None,
         deep_detail=None,
     ):
-        objectness = None if task_signals is None else task_signals["obj"]
         fused_shallow, shallow_stats = self.level1(
             shallow_ir,
             shallow_vis,
-            objectness=objectness,
+            mask_prior=mask_prior,
             detail_feat=shallow_detail,
         )
         deep_ir = self.transfer(fused_shallow, deep_ir)
         deep_vis = self.transfer(fused_shallow, deep_vis)
-        deep_objectness = None if objectness is None else F.interpolate(objectness, size=deep_ir.shape[-2:], mode="bilinear", align_corners=False)
+        deep_mask = None if mask_prior is None else F.interpolate(mask_prior, size=deep_ir.shape[-2:], mode="bilinear", align_corners=False)
         fused_deep, deep_stats = self.level2(
             deep_ir,
             deep_vis,
-            objectness=deep_objectness,
+            mask_prior=deep_mask,
             detail_feat=deep_detail,
         )
 

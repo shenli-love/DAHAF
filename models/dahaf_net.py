@@ -7,7 +7,12 @@ import torch.nn.functional as F
 from .de_encoder import DE_Encoder, make_norm
 from .decoder import DE_Decoder
 from .hcfb import HCFB
-from .yolo11_bridge import TaskBridge, YOLO11Detector
+from .sam_mask_guidance import SAMMaskGuidanceBranch
+
+try:
+    from .yolo11_bridge import YOLO11Detector
+except Exception:
+    YOLO11Detector = None
 
 
 class DAHAFNet(nn.Module):
@@ -26,14 +31,19 @@ class DAHAFNet(nn.Module):
         detector_pretrained="yolo11n.pt",
         detector_freeze=True,
         detector_initial_no_grad=True,
-        task_dim=64,
-        bridge_channels=128,
-        objectness_guidance_alpha=0.05,
+        use_aux_detector=False,
+        mask_guidance_alpha=0.08,
+        sam_prompt_channels=1,
     ):
         super().__init__()
-        self.objectness_guidance_alpha = objectness_guidance_alpha
+        self.mask_guidance_alpha = mask_guidance_alpha
         self.encoder_ir = DE_Encoder(inp_channels=inp_channels, dims=dims)
         self.encoder_vis = DE_Encoder(inp_channels=inp_channels, dims=dims)
+        self.sam_mask_branch = SAMMaskGuidanceBranch(
+            in_channels=inp_channels,
+            hidden_channels=max(dims[0], 16),
+            prompt_channels=sam_prompt_channels,
+        )
         self.vis_chroma_adapter = nn.ModuleDict({
             "stage1": self._make_chroma_adapter(2, dims[0]),
             "stage2": self._make_chroma_adapter(2, dims[1]),
@@ -55,9 +65,6 @@ class DAHAFNet(nn.Module):
         self.hcfb = HCFB(
             shallow_channels=dims[0],
             deep_channels=dims[2],
-            task_dim=task_dim,
-            shallow_heads=4,
-            deep_heads=8,
         )
         self.mid_fusion = nn.Sequential(
             nn.Conv2d(dims[1] * 3, dims[1], kernel_size=1, bias=False),
@@ -70,23 +77,23 @@ class DAHAFNet(nn.Module):
             shallow_dim=dims[0],
             out_channels=1,
         )
-        self.detector = YOLO11Detector(
-            cfg=detector_cfg,
-            num_classes=num_classes,
-            image_size=detector_input_size,
-            box_gain=detector_box_gain,
-            cls_gain=detector_cls_gain,
-            dfl_gain=detector_dfl_gain,
-            pretrained_weights=detector_pretrained,
-            freeze=detector_freeze,
-            verbose=False,
-        )
-        self.task_bridge = TaskBridge(
-            detector_channels=self.detector.feature_channels,
-            fusion_dim=dims[1],
-            bridge_channels=bridge_channels,
-        )
+        self.detector = None
+        if use_aux_detector:
+            if YOLO11Detector is None:
+                raise RuntimeError("Auxiliary detector requested but YOLO11Detector is unavailable.")
+            self.detector = YOLO11Detector(
+                cfg=detector_cfg,
+                num_classes=num_classes,
+                image_size=detector_input_size,
+                box_gain=detector_box_gain,
+                cls_gain=detector_cls_gain,
+                dfl_gain=detector_dfl_gain,
+                pretrained_weights=detector_pretrained,
+                freeze=detector_freeze,
+                verbose=False,
+            )
         self.detector_initial_no_grad = detector_initial_no_grad
+        self.use_aux_detector = use_aux_detector
 
     @staticmethod
     def _make_chroma_adapter(in_channels, out_channels):
@@ -161,7 +168,7 @@ class DAHAFNet(nn.Module):
         gate = self.vis_detail_gate[stage_name](aux_feat)
         return vis_feat + gate * aux_feat
 
-    def fuse_features(self, ir_feats, vis_feats, mid_fused, chroma_feats=None, detail_feats=None, task_signals=None):
+    def fuse_features(self, ir_feats, vis_feats, mid_fused, chroma_feats=None, detail_feats=None, mask_prior=None):
         chroma_stage1 = chroma_feats["stage1"] if chroma_feats is not None else None
         chroma_stage3 = chroma_feats["stage3"] if chroma_feats is not None else None
         detail_stage1 = detail_feats["stage1"] if detail_feats is not None else None
@@ -173,10 +180,13 @@ class DAHAFNet(nn.Module):
             vis_stage1,
             ir_feats["stage3"],
             vis_stage3,
-            task_signals=task_signals,
+            mask_prior=mask_prior,
             shallow_detail=detail_stage1,
             deep_detail=detail_stage3,
         )
+        if mask_prior is not None:
+            mask_mid = F.interpolate(mask_prior, size=mid_fused.shape[-2:], mode="bilinear", align_corners=False)
+            mid_fused = mid_fused * (1.0 + self.mask_guidance_alpha * mask_mid)
         return {
             "shallow": fusion["fused_shallow"],
             "mid": mid_fused,
@@ -184,7 +194,7 @@ class DAHAFNet(nn.Module):
             "stats": fusion["stats"],
         }
 
-    def decode(self, fused_features, img_ir, img_vis, detail_map=None):
+    def decode(self, fused_features, img_ir, img_vis, detail_map=None, mask_prior=None):
         vis_blur = F.avg_pool2d(img_vis, kernel_size=7, stride=1, padding=3)
         residual = img_vis - vis_blur
         return self.decoder(
@@ -193,17 +203,25 @@ class DAHAFNet(nn.Module):
             fused_features["shallow"],
             residual=residual,
             detail_map=detail_map,
+            mask_prior=mask_prior,
         )
 
-    def apply_objectness_guidance(self, fused, task_signals):
-        if task_signals is None or "obj" not in task_signals:
+    def apply_mask_guidance(self, fused, mask_prior):
+        if mask_prior is None:
             return fused
-        obj = task_signals["obj"]
-        obj = F.interpolate(obj, size=fused.shape[-2:], mode="bilinear", align_corners=False)
-        obj = obj.clamp(0.0, 1.0)
+        mask_prior = F.interpolate(mask_prior, size=fused.shape[-2:], mode="bilinear", align_corners=False)
+        mask_prior = mask_prior.clamp(0.0, 1.0)
         detail = fused - F.avg_pool2d(fused, kernel_size=3, stride=1, padding=1)
-        guided = fused + 0.5 * self.objectness_guidance_alpha * obj * detail
+        guided = fused + 0.5 * self.mask_guidance_alpha * mask_prior * detail
         return guided.clamp(0.0, 1.0)
+
+    def auxiliary_detection(self, fused_output, run_detection):
+        if not run_detection or self.detector is None:
+            return None
+        if self.detector_initial_no_grad:
+            with torch.no_grad():
+                return self.detector(fused_output)
+        return self.detector(fused_output)
 
     def forward(
         self,
@@ -211,9 +229,18 @@ class DAHAFNet(nn.Module):
         img_vis,
         img_vis_chroma: Optional[torch.Tensor] = None,
         detail_map: Optional[torch.Tensor] = None,
+        sam_mask: Optional[torch.Tensor] = None,
         targets: Optional[List[Dict[str, torch.Tensor]]] = None,
-        run_detection: bool = True,
+        run_detection: bool = False,
     ):
+        if sam_mask is None and targets:
+            masks = [target.get("sam_mask") for target in targets]
+            if all(mask is not None for mask in masks):
+                sam_mask = torch.stack(masks, dim=0)
+
+        mask_outputs = self.sam_mask_branch(img_ir, prompt_mask=sam_mask)
+        mask_prior = mask_outputs["mask"]
+
         ir_feats, vis_feats, chroma_feats, detail_feats = self.encode_modalities(
             img_ir,
             img_vis,
@@ -232,44 +259,25 @@ class DAHAFNet(nn.Module):
             base_mid,
             chroma_feats=chroma_feats,
             detail_feats=detail_feats,
+            mask_prior=mask_prior,
         )
-        fused_output = self.decode(fused_features, img_ir, img_vis, detail_map=detail_map)
+        fused_output = self.decode(fused_features, img_ir, img_vis, detail_map=detail_map, mask_prior=mask_prior)
+        fused_output = self.apply_mask_guidance(fused_output, mask_prior)
 
-        detector_initial = None
-        task_signals = None
-
-        if run_detection:
-            if self.detector_initial_no_grad:
-                with torch.no_grad():
-                    detector_initial = self.detector(fused_output)
-            else:
-                detector_initial = self.detector(fused_output)
-
-            task_signals = self.task_bridge(
-                detector_initial["feats"], ir_feats, vis_feats, base_mid
-            )
-            fused_features = self.fuse_features(
-                ir_feats,
-                vis_feats,
-                base_mid,
-                chroma_feats=chroma_feats,
-                detail_feats=detail_feats,
-                task_signals=task_signals,
-            )
-            fused_output = self.decode(fused_features, img_ir, img_vis, detail_map=detail_map)
-            fused_output = self.apply_objectness_guidance(fused_output, task_signals)
+        detector_initial = self.auxiliary_detection(fused_output, run_detection)
 
         return {
             "fused": fused_output,
             "detector_initial": detector_initial,
-            "task_signals": task_signals,
+            "mask_outputs": mask_outputs,
+            "mask_prior": mask_prior,
             "fusion_stats": fused_features["stats"],
             "ir_feats": ir_feats,
             "vis_feats": vis_feats,
         }
 
     def detection_loss(self, outputs, targets):
-        if outputs["detector_initial"] is None:
+        if self.detector is None or outputs["detector_initial"] is None:
             zero = outputs["fused"].new_tensor(0.0)
             metrics = {
                 "box": zero,

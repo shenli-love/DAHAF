@@ -92,6 +92,10 @@ class M3FDDataset(Dataset):
         self.xml_dir = os.path.join(root, "Annotation")
         self.label_dir = os.path.join(root, "labels")
         self.meta_dir = os.path.join(root, "meta")
+        self.mask_dirs = [
+            os.path.join(root, "sam_masks"),
+            os.path.join(root, "masks"),
+        ]
         self.ir_files = self._index_images(self.ir_dir)
         self.vis_files = self._index_images(self.vis_dir)
         self.samples = self._build_index(split)
@@ -169,6 +173,7 @@ class M3FDDataset(Dataset):
             np.stack([vis_cb, vis_cr], axis=0).astype(np.float32) / 255.0
         )
         img_vis_detail = torch.from_numpy(vis_detail.astype(np.float32)).unsqueeze(0)
+        sam_mask = self._load_sam_mask(name)
 
         boxes, labels = self._load_targets(name, resize_meta)
         target = {
@@ -188,7 +193,20 @@ class M3FDDataset(Dataset):
                 "orig_h": torch.tensor(resize_meta["orig_h"], dtype=torch.float32),
             },
         }
+        if sam_mask is not None:
+            sam_mask, _ = letterbox_resize(sam_mask, self.image_size, interpolation=cv2.INTER_AREA, pad_value=0)
+            target["sam_mask"] = torch.from_numpy(sam_mask.astype(np.float32) / 255.0).unsqueeze(0)
         return img_ir, img_vis, target
+
+    def _load_sam_mask(self, name):
+        for mask_dir in self.mask_dirs:
+            for ext in (".png", ".jpg", ".jpeg", ".bmp"):
+                path = os.path.join(mask_dir, f"{name}{ext}")
+                if os.path.isfile(path):
+                    mask = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+                    if mask is not None:
+                        return mask
+        return None
 
     def _load_targets(self, name, resize_meta):
         txt_path = os.path.join(self.label_dir, f"{name}.txt")

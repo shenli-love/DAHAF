@@ -116,13 +116,12 @@ def analyze_model():
                 "contrastive_proj": 64,
             },
             "DETECTION": {
+                "enabled": False,
                 "num_classes": 6,
                 "detector_cfg": "yolo11n.yaml",
                 "detector_input_size": 256,
                 "detector_pretrained": "yolo11n.pt",
                 "freeze": True,
-                "task_dim": 64,
-                "bridge_channels": 128,
             }
         }
     
@@ -142,9 +141,8 @@ def analyze_model():
         detector_input_size=cfg["DETECTION"]["detector_input_size"],
         detector_pretrained=cfg["DETECTION"]["detector_pretrained"],
         detector_freeze=cfg["DETECTION"]["freeze"],
-        task_dim=cfg["DETECTION"]["task_dim"],
-        bridge_channels=cfg["DETECTION"]["bridge_channels"],
-        objectness_guidance_alpha=cfg["DETECTION"].get("objectness_guidance_alpha", 0.05),
+        use_aux_detector=cfg["DETECTION"].get("enabled", False),
+        mask_guidance_alpha=cfg.get("MASK_GUIDANCE", {}).get("guidance_alpha", 0.08),
     ).to(device)
     
     model.eval()
